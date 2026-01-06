@@ -8,6 +8,9 @@ workers_dev = true
 PAYMENT_ADDRESS = "SP2QXPFF4M72QYZWXE7S5321XJDJ2DD32DGEMN5QA"
 SBTC_PRICE_SATS = "100000"  # $1 worth of sBTC (~0.001 BTC at $100k)
 
+# Secret: MESHY_API_KEY - Get from https://www.meshy.ai/api (Developer Settings)
+# Set with: bunx wrangler secret put MESHY_API_KEY
+
 [[kv_namespaces]]
 binding = "PRINT_QUEUE"
 id = "ce14257a584148109a1df0afe328436a"

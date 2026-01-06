@@ -5,6 +5,7 @@ interface Env {
   PRINT_QUEUE: KVNamespace;
   PAYMENT_ADDRESS: string;
   SBTC_PRICE_SATS: string;
+  MESHY_API_KEY: string;
 }
 
 interface PrintJob {
@@ -20,7 +21,7 @@ interface PrintJob {
 }
 
 interface ShapeConfig {
-  type: 'cube' | 'cylinder' | 'sphere' | 'cone' | 'torus' | 'text' | 'custom';
+  type: 'cube' | 'cylinder' | 'sphere' | 'cone' | 'torus' | 'text' | 'custom' | 'ai';
   dimensions: {
     width?: number;
     height?: number;
@@ -29,11 +30,77 @@ interface ShapeConfig {
     text?: string;
   };
   units: 'mm';
+  aiModelUrl?: string;  // URL to AI-generated GLB model
+  meshyTaskId?: string; // Meshy task ID for polling
+}
+
+interface MeshyTask {
+  id: string;
+  status: 'PENDING' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED';
+  progress: number;
+  model_urls?: {
+    glb: string;
+    fbx: string;
+    obj: string;
+    stl: string;
+  };
+  thumbnail_url?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.use('*', cors());
+
+// Meshy AI API functions
+async function createMeshyTask(prompt: string, apiKey: string): Promise<string> {
+  const response = await fetch('https://api.meshy.ai/openapi/v2/text-to-3d', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      mode: 'preview',
+      prompt: prompt.slice(0, 600), // Max 600 chars
+      art_style: 'realistic',
+      ai_model: 'meshy-4', // Use meshy-4 for speed (5 credits vs 20)
+      topology: 'triangle',
+      target_polycount: 10000, // Lower for faster generation
+    }),
+  });
+
+  const data = await response.json() as { result: string };
+  return data.result; // Returns task ID
+}
+
+async function getMeshyTask(taskId: string, apiKey: string): Promise<MeshyTask> {
+  const response = await fetch(`https://api.meshy.ai/openapi/v2/text-to-3d/${taskId}`, {
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+    },
+  });
+
+  return response.json() as Promise<MeshyTask>;
+}
+
+// Check if prompt is for a basic shape (fast) or needs AI generation
+function isBasicShape(prompt: string): boolean {
+  const lower = prompt.toLowerCase();
+  const basicPatterns = [
+    /^a?\s*\d*\s*mm?\s*(cube|box|block|square)/,
+    /^a?\s*\d*\s*mm?\s*(sphere|ball|orb)/,
+    /^a?\s*\d*\s*mm?\s*(cylinder|tube|pipe|rod)/,
+    /^a?\s*\d*\s*mm?\s*(cone|pyramid)/,
+    /^a?\s*\d*\s*mm?\s*(donut|torus|ring)/,
+    /(cube|box|block)\s*\d/,
+    /(sphere|ball)\s*\d/,
+    /(cylinder|tube)\s*\d/,
+    /(cone|pyramid)\s*\d/,
+    /(donut|torus|ring)\s*\d/,
+  ];
+
+  return basicPatterns.some(pattern => pattern.test(lower));
+}
 
 // Parse natural language prompt into shape config
 function parsePrompt(prompt: string): ShapeConfig {
@@ -669,6 +736,10 @@ Or: A cool sphere ball 40mm"></textarea>
       const prompt = document.getElementById('prompt').value;
       if (!prompt.trim()) return;
 
+      const btn = document.querySelector('.btn');
+      btn.disabled = true;
+      btn.textContent = '🔮 CREATING...';
+
       // Call API to parse and generate
       const response = await fetch('/api/preview', {
         method: 'POST',
@@ -677,9 +748,45 @@ Or: A cool sphere ball 40mm"></textarea>
       });
 
       const data = await response.json();
-      currentShape = data.shape;
 
-      // Update dimensions display
+      if (data.error) {
+        btn.disabled = false;
+        btn.textContent = '✨ CREATE MAGIC! ✨';
+        alert('Error: ' + data.error);
+        return;
+      }
+
+      // Check if AI generation mode
+      if (data.mode === 'ai' && data.taskId) {
+        document.getElementById('dimensions').style.display = 'block';
+        document.getElementById('dim-shape').textContent = '🤖 AI GENERATING...';
+        document.getElementById('dim-size').textContent = 'Please wait...';
+        document.getElementById('dim-volume').textContent = '~50 cm³';
+        document.getElementById('dim-time').textContent = '~30 min';
+
+        // Show loading mesh
+        showLoadingMesh();
+
+        // Poll for completion
+        pollAIStatus(data.taskId, prompt);
+        return;
+      }
+
+      // Basic shape mode
+      currentShape = data.shape;
+      showShapeResult(data);
+
+      // Show message if present (e.g., AI not configured)
+      if (data.message) {
+        document.getElementById('dim-shape').textContent = data.shape.type.toUpperCase() + ' ⚡';
+        console.log(data.message);
+      }
+
+      btn.disabled = false;
+      btn.textContent = '✨ CREATE MAGIC! ✨';
+    }
+
+    function showShapeResult(data) {
       document.getElementById('dimensions').style.display = 'block';
       document.getElementById('dim-shape').textContent = data.shape.type.toUpperCase();
 
@@ -701,6 +808,93 @@ Or: A cool sphere ball 40mm"></textarea>
 
       // Update 3D preview
       updateMesh(data.shape);
+    }
+
+    function showLoadingMesh() {
+      if (mesh) scene.remove(mesh);
+
+      // Show spinning placeholder
+      const geometry = new THREE.TorusKnotGeometry(20, 5, 64, 16);
+      const material = new THREE.MeshPhongMaterial({
+        color: 0x00f5ff,
+        wireframe: true
+      });
+      mesh = new THREE.Mesh(geometry, material);
+      mesh.position.y = 30;
+      scene.add(mesh);
+    }
+
+    let aiModelUrl = null;
+
+    async function pollAIStatus(taskId, originalPrompt) {
+      const btn = document.querySelector('.btn');
+
+      const poll = async () => {
+        try {
+          const response = await fetch('/api/ai-status/' + taskId);
+          const data = await response.json();
+
+          if (data.status === 'SUCCEEDED' && data.modelUrl) {
+            // AI model ready!
+            document.getElementById('dim-shape').textContent = '🎨 AI MODEL READY!';
+            document.getElementById('dim-size').textContent = 'Custom creation';
+
+            aiModelUrl = data.modelUrl;
+            currentShape = {
+              type: 'ai',
+              dimensions: { width: 50, height: 50, depth: 50 },
+              units: 'mm',
+              aiModelUrl: data.modelUrl
+            };
+
+            // Load GLB model
+            loadGLBModel(data.modelUrl);
+
+            btn.disabled = false;
+            btn.textContent = '✨ CREATE MAGIC! ✨';
+            document.getElementById('payBtn').disabled = false;
+            return;
+          }
+
+          if (data.status === 'FAILED') {
+            document.getElementById('dim-shape').textContent = '❌ FAILED';
+            btn.disabled = false;
+            btn.textContent = '✨ CREATE MAGIC! ✨';
+            return;
+          }
+
+          // Still processing
+          document.getElementById('dim-shape').textContent = '🔮 ' + data.progress + '% COMPLETE';
+
+          // Continue polling
+          setTimeout(poll, 2000);
+        } catch (error) {
+          console.error('Poll error:', error);
+          setTimeout(poll, 3000);
+        }
+      };
+
+      poll();
+    }
+
+    async function loadGLBModel(url) {
+      // Load GLB using Three.js GLTFLoader
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js';
+      script.onload = () => {
+        const loader = new THREE.GLTFLoader();
+        loader.load(url, (gltf) => {
+          if (mesh) scene.remove(mesh);
+
+          mesh = gltf.scene;
+          mesh.scale.set(30, 30, 30);
+          mesh.position.y = 20;
+          scene.add(mesh);
+        }, undefined, (error) => {
+          console.error('GLB load error:', error);
+        });
+      };
+      document.head.appendChild(script);
     }
 
     function updateMesh(shape) {
@@ -792,41 +986,99 @@ Or: A cool sphere ball 40mm"></textarea>
 </html>`);
 });
 
-// Preview endpoint
+// Preview endpoint - supports both basic shapes and AI generation
 app.post('/api/preview', async (c) => {
   const { prompt } = await c.req.json();
-  const shape = parsePrompt(prompt);
 
-  // Calculate volume in cm³
-  let volumeCm3 = 0;
-  const dims = shape.dimensions;
+  // Check if it's a basic shape or needs AI
+  if (isBasicShape(prompt)) {
+    // Fast path: basic geometric shapes
+    const shape = parsePrompt(prompt);
+    const dims = shape.dimensions;
+    let volumeCm3 = 0;
 
-  switch (shape.type) {
-    case 'cube':
-      volumeCm3 = ((dims.width || 50) * (dims.height || 50) * (dims.depth || 50)) / 1000;
-      break;
-    case 'cylinder':
-      volumeCm3 = (Math.PI * Math.pow(dims.radius || 25, 2) * (dims.height || 50)) / 1000;
-      break;
-    case 'sphere':
-      volumeCm3 = ((4/3) * Math.PI * Math.pow(dims.radius || 25, 3)) / 1000;
-      break;
-    case 'cone':
-      volumeCm3 = ((1/3) * Math.PI * Math.pow(dims.radius || 25, 2) * (dims.height || 50)) / 1000;
-      break;
-    case 'torus':
-      volumeCm3 = (2 * Math.PI * Math.PI * (dims.radius || 30) * Math.pow((dims.width || 10) / 2, 2)) / 1000;
-      break;
+    switch (shape.type) {
+      case 'cube':
+        volumeCm3 = ((dims.width || 50) * (dims.height || 50) * (dims.depth || 50)) / 1000;
+        break;
+      case 'cylinder':
+        volumeCm3 = (Math.PI * Math.pow(dims.radius || 25, 2) * (dims.height || 50)) / 1000;
+        break;
+      case 'sphere':
+        volumeCm3 = ((4/3) * Math.PI * Math.pow(dims.radius || 25, 3)) / 1000;
+        break;
+      case 'cone':
+        volumeCm3 = ((1/3) * Math.PI * Math.pow(dims.radius || 25, 2) * (dims.height || 50)) / 1000;
+        break;
+      case 'torus':
+        volumeCm3 = (2 * Math.PI * Math.PI * (dims.radius || 30) * Math.pow((dims.width || 10) / 2, 2)) / 1000;
+        break;
+    }
+
+    const estimatedMinutes = Math.max(5, Math.round(volumeCm3 * 1.5));
+
+    return c.json({
+      shape,
+      volumeCm3,
+      estimatedMinutes,
+      mode: 'basic',
+    });
   }
 
-  // Estimate print time (rough: ~10 min per 10 cm³ at high speed)
-  const estimatedMinutes = Math.max(5, Math.round(volumeCm3 * 1.5));
+  // AI path: create Meshy task for complex objects
+  if (!c.env.MESHY_API_KEY) {
+    // No API key - fall back to generic shape with helpful message
+    return c.json({
+      shape: {
+        type: 'cube' as const,
+        dimensions: { width: 50, height: 50, depth: 50 },
+        units: 'mm' as const,
+      },
+      volumeCm3: 125,
+      estimatedMinutes: 188,
+      mode: 'basic',
+      message: 'AI generation not configured. Showing placeholder cube. Try basic shapes like "A 50mm cube" or "A 30mm sphere"!',
+    });
+  }
 
-  return c.json({
-    shape,
-    volumeCm3,
-    estimatedMinutes,
-  });
+  try {
+    const taskId = await createMeshyTask(prompt, c.env.MESHY_API_KEY);
+
+    return c.json({
+      shape: {
+        type: 'ai' as const,
+        dimensions: { width: 50, height: 50, depth: 50 },
+        units: 'mm' as const,
+        meshyTaskId: taskId,
+      },
+      volumeCm3: 50, // Estimated
+      estimatedMinutes: 30,
+      mode: 'ai',
+      taskId,
+      message: 'AI is generating your 3D model... This takes 30-60 seconds.',
+    });
+  } catch (error: any) {
+    return c.json({ error: 'AI generation failed: ' + error.message }, 500);
+  }
+});
+
+// Poll AI generation status
+app.get('/api/ai-status/:taskId', async (c) => {
+  const taskId = c.req.param('taskId');
+
+  try {
+    const task = await getMeshyTask(taskId, c.env.MESHY_API_KEY);
+
+    return c.json({
+      status: task.status,
+      progress: task.progress,
+      modelUrl: task.model_urls?.glb,
+      stlUrl: task.model_urls?.stl,
+      thumbnail: task.thumbnail_url,
+    });
+  } catch (error: any) {
+    return c.json({ error: error.message }, 500);
+  }
 });
 
 // Create order (x402 payment required)
