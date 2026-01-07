@@ -10,7 +10,7 @@
  * 3. Run: bun run print-server/server.ts
  */
 
-const CLOUD_API = "https://sbtc-print.p-d07.workers.dev";
+const CLOUD_API = "https://print.pbtc21.dev";
 const PRINTER_IP = process.env.PRINTER_IP || "192.168.1.100"; // Change to your printer's IP
 const MOONRAKER_PORT = 7125;
 const POLL_INTERVAL = 10000; // Check every 10 seconds
