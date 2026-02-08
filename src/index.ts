@@ -1081,6 +1081,48 @@ app.get('/api/ai-status/:taskId', async (c) => {
   }
 });
 
+// x402 Discovery endpoint for /api/order
+app.get('/api/order', (c) => {
+  return c.json({
+    x402Version: 1,
+    name: "sBTC Print",
+    accepts: [{
+      scheme: "exact",
+      network: "stacks",
+      maxAmountRequired: c.env.SBTC_PRICE_SATS,
+      resource: "/api/order",
+      description: "3D printing with Bitcoin - Create custom 3D printed objects",
+      mimeType: "application/json",
+      payTo: c.env.PAYMENT_ADDRESS,
+      maxTimeoutSeconds: 300,
+      asset: "sBTC",
+      outputSchema: {
+        input: {
+          type: "object",
+          properties: {
+            prompt: {
+              type: "string",
+              description: "Natural language description of the 3D object to print"
+            }
+          },
+          required: ["prompt"]
+        },
+        output: {
+          type: "object",
+          properties: {
+            orderId: { type: "string" },
+            amount: { type: "string" },
+            payTo: { type: "string" },
+            tokenType: { type: "string" },
+            network: { type: "string" },
+            expiresAt: { type: "string" }
+          }
+        }
+      }
+    }]
+  });
+});
+
 // Create order (x402 payment required)
 app.post('/api/order', async (c) => {
   const { prompt } = await c.req.json();
